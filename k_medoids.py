@@ -50,7 +50,7 @@ def k_medoids(distances, number_clusters, timelimit=100, mipgap=0.0001):
         y[j] = model.addVar(vtype="B", name="y_"+str(j))
 
         for i in range(length):
-            x[i,j] = model.addVar(vtype="B", name="x_"+str(i)+"_"+str(j))
+            x[i,j] = model.addVar(vtype="B", name=f"x_{i}_{j}")
 
     # Update to introduce the variables to the model
     model.update()

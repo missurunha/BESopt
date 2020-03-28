@@ -11,15 +11,49 @@ from __future__ import division
 import gurobipy as gp
 import numpy as np
 import math
-import pickle
+from postprocess import OptimizationResults
 
 def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs, mfocus=0):
-    """
+    """Calculate optimal building ES.
+
     Compute the optimal building energy system consisting of pre-defined
     devices (devs) for a given building (demands) under given economic and
     other parameters (eco and params).
-    """
 
+    Parameters
+    ---------
+    eco :
+
+    devs :
+
+    demands :
+
+    params :
+
+    max_emi :
+
+    options :
+
+    max_costs :
+
+    forced_devs :
+
+    mfocus : int
+    Gurobi parameter: By default, the Gurobi MIP solver strikes a balance between finding new feasible
+    solutions and proving that the current solution is optimal. If you are more interested in finding
+    feasible solutions quickly, you can select MIPFocus=1. If you believe the solver is having no trouble
+    finding good quality solutions, and wish to focus more attention on proving optimality, select
+    MIPFocus=2. If the best objective bound is moving very slowly (or not at all), you may want to
+    try MIPFocus=3 to focus on the bound.
+
+    Returns
+    -------
+    res_c_total: float
+        Total costs.
+    res_emission: float
+        Total COeq. emissions.
+
+    """
     # Extract parameters
     dt = params["dt"]
 
@@ -79,19 +113,19 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
         energy = {}
         for d in days: # All days
             for t in time_steps: # All time steps of all days
-                timetag = "_"+str(d)+"_"+str(t)
+                timetag = f"_{d}_{t}"
                 for dev in storage: # All storage devices
                     for n in devs[dev].keys(): # All listed types of each dev
                         soc[dev,n,d,t] = model.addVar(vtype="C",
-                                         name="SOC_"+dev+"_"+str(n)+timetag,
+                                         name=f"SOC_{dev}_{n}_{timetag}",
                                          lb=0, ub=1)
 
                 for dev in (heater_ehdhw+solar):
                     for n in devs[dev].keys():
                         power[dev,n,d,t] = model.addVar(vtype="C",
-                                           name="P_"+dev+"_"+str(n)+timetag)
+                                           name=f"P_{dev}_{n}_{timetag}")
                         heat[dev,n,d,t] = model.addVar(vtype="C",
-                                           name="Q_"+dev+"_"+str(n)+timetag)
+                                           name=f"Q_{dev}_{n}_{timetag}")
 
                 for dev in heater_ehdhw:
                     for n in devs[dev].keys():
@@ -102,40 +136,41 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
         lin = {}
         number_nodes = {}
         number_nodes_hp = {}
-        for dev in ("boiler", "chp", "hp"):
-            if dev in ("chp", "boiler"):
-                for n in devs[dev].keys():
-                    number_nodes[dev,n] = len(devs[dev][n]["Q_heat"])
-                    for d in days:
-                        for t in time_steps:
-                            for i in range(number_nodes[dev,n]):
-                                tag = "_"+str(dev)+"_"+str(n)+"_"+str(d)+"_"+str(t)+"_"+str(i)
-                                lin[dev,n,d,t,i] = model.addVar(vtype="C", name="lin_"+tag)
 
-            dev = "hp"
+
+        for dev in ("chp", "boiler"):
             for n in devs[dev].keys():
-                m= devs[dev][n]["Mod"]
-                if m == 'stageless':
-                    for d in days: # All days
-                        for t in time_steps: # All time steps of all days
-                            number_nodes_hp[dev,n,d,t] = len(devs[dev][n]["Q_heat"][d,t])
-                            for i in range(number_nodes_hp[dev,n,d,t]):
-                                tag = "_"+str(dev)+"_"+str(n)+"_"+str(d)+"_"+str(t)+"_"+str(i)
-                                lin[dev,n,d,t,i] = model.addVar(vtype="C", name="lin_"+tag)
-                if m == 'stage':
-                    for d in days: # All days
-                        for t in time_steps: # All time steps of all days
-                            number_nodes_hp[dev,n,d,t] = len(devs[dev][n]["Q_heat"][d,t])
-                            for i in range(number_nodes_hp[dev,n,d,t]):
-                                tag = "_"+str(dev)+"_"+str(n)+"_"+str(d)+"_"+str(t)+"_"+str(i)
-                                lin[dev,n,d,t,i] = model.addVar(vtype="B", name="lin_"+tag)
+                number_nodes[dev,n] = len(devs[dev][n]["Q_heat"])
+                for d in days:
+                    for t in time_steps:
+                        for i in range(number_nodes[dev,n]):
+                            tag = f"_{dev}_{n}_{d}_{t}_{i}"
+                            lin[dev,n,d,t,i] = model.addVar(vtype="C", name="lin_"+tag)
+
+        dev = "hp"
+        for n in devs[dev].keys():
+            m = devs[dev][n]["Mod"]
+            if m == 'stageless':
+                for d in days: # All days
+                    for t in time_steps: # All time steps of all days
+                        number_nodes_hp[dev,n,d,t] = len(devs[dev][n]["Q_heat"][d,t])
+                        for i in range(number_nodes_hp[dev,n,d,t]):
+                            tag = f"_{dev}_{n}_{d}_{t}_{i}"
+                            lin[dev,n,d,t,i] = model.addVar(vtype="C", name="lin_"+tag)
+            if m == 'stage':
+                for d in days: # All days
+                    for t in time_steps: # All time steps of all days
+                        number_nodes_hp[dev,n,d,t] = len(devs[dev][n]["Q_heat"][d,t])
+                        for i in range(number_nodes_hp[dev,n,d,t]):
+                            tag = f"_{dev}_{n}_{d}_{t}_{i}"
+                            lin[dev,n,d,t,i] = model.addVar(vtype="B", name="lin_"+tag)
 
         # Storage initial SOC's
         soc_init = {}
         for dev in storage:
             for n in devs[dev].keys():
                 for d in days:
-                    tag = dev + "_" + str(n) + "_" + str(d)
+                    tag = f"{dev}_{n}_{d}"
                     soc_init[dev,n,d] = model.addVar(vtype="C", lb=0, ub=1,
                                                      name="SOC_init_"+tag)
 
@@ -146,12 +181,12 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
             for n in devs[dev].keys():
                 for d in days:
                     for t in time_steps:
-                        timetag = "_"+str(d)+"_"+str(t)
+                        timetag = f"_{d}_{t}"
 
                         ch[dev,n,d,t] = model.addVar(vtype="C",
-                                        name="ch_"+dev+"_"+str(n)+timetag)
+                                        name=f"ch_{dev}_{n}_{timetag}")
                         dch[dev,n,d,t] = model.addVar(vtype="C",
-                                         name="dch_"+dev+"_"+str(n)+timetag)
+                                         name=f"dch_{dev}_{n}_{timetag}")
 
         # Electricity imports, sold, self-used and transferred (to heat pump) electricity
         p_grid  = {}
@@ -160,7 +195,7 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
         p_hp    = {}
         for d in days:
             for t in time_steps:
-                timetag = "_"+str(d)+"_"+str(t)
+                timetag = f"_{d}_{t}"
 
                 p_grid["grid_hou",d,t] = model.addVar(vtype="C", name="p_grid_hou"+timetag)
                 p_grid["grid_hp",d,t]  = model.addVar(vtype="C", name="p_grid_hp"+timetag)
@@ -175,19 +210,19 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
                                                    name="P_hp_"+dev+timetag)
                 for n in devs["chp"].keys():
                     dev = "chp"
-                    p_hp[dev,n,d,t] = model.addVar(vtype="C", name="P_hp_"+dev+"_"+str(n)+timetag)
-                    p_use[dev,n,d,t] = model.addVar(vtype="C", name="P_use_"+dev+"_"+str(n)+timetag)
-                    p_sell[dev,n,d,t] = model.addVar(vtype="C", name="P_sell_"+dev+"_"+str(n)+timetag)
+                    p_hp[dev,n,d,t] = model.addVar(vtype="C", name=f"P_hp_{dev}_{n}_{timetag}")
+                    p_use[dev,n,d,t] = model.addVar(vtype="C", name=f"P_use_{dev}_{n}_{timetag}")
+                    p_sell[dev,n,d,t] = model.addVar(vtype="C", name=f"P_sell_{dev}_{n}_{timetag}")
 
         # Amount of gas consumed
-        gas_tariffs = eco["gas"].keys()
+        gas_tariffs = list(eco["gas"].keys())
         gas_tariffs.remove("energy_tax")
         G = {}
         for tar in gas_tariffs:
             G[tar] = {}
             for dev in ("boiler","chp"):
                 for n in range(len(eco["gas"][tar]["lb"])):
-                    G[tar][dev,n] = model.addVar(vtype="C", name="G_"+dev+"_"+str(n))
+                    G[tar][dev,n] = model.addVar(vtype="C", name=f"G_{dev}_{n}")
         G_total = {dev: model.addVar(vtype="C", name="G_total_"+dev)
                   for dev in ("boiler","chp")}
 
@@ -198,7 +233,7 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
             El[tar] = {}
             for dev in ("grid_hou","grid_hp"):
                 for n in range(len(eco["el"][tar]["lb"])):
-                    El[tar][dev,n] = model.addVar(vtype="C", name="El_"+dev+"_"+str(n))
+                    El[tar][dev,n] = model.addVar(vtype="C", name=f"El_{dev}_{n}")
         El_total = {dev: model.addVar(vtype="C", name="El_total_"+dev)
                     for dev in ("grid_hou","grid_hp")}
 
@@ -206,7 +241,7 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
         eh_split = {}
         for d in days:
             for t in time_steps:
-                timetag = "_"+str(d)+"_"+str(t)
+                timetag = f"_{d}_{t}"
 
                 eh_split["eh_w/o_hp",d,t] = model.addVar(vtype="C", name="p_eh_w/o_hp"+timetag)
                 eh_split["eh_w/_hp",d,t]  = model.addVar(vtype="C", name="p_eh_w/_hp"+timetag)
@@ -215,8 +250,8 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
         lim_sell = {}
         for d in days:
             for t in time_steps:
-                lim_ch[d,t] = model.addVar(vtype="B", name="lim_ch"+"_"+str(d)+"_"+str(t))
-                lim_sell[d,t] = model.addVar(vtype="B", name="lim_sell"+"_"+str(d)+"_"+str(t))
+                lim_ch[d,t] = model.addVar(vtype="B", name=f"lim_ch_{d}_{t}")
+                lim_sell[d,t] = model.addVar(vtype="B", name=f"lim_sell_{d}_{t}")
 
         # Activation and purchase decision variables
         x = {}  # Purchase (all devices)
@@ -226,7 +261,7 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
 
         for dev in devs.keys():
             for n in devs[dev].keys():
-                x[dev,n] = model.addVar(vtype="B", name="x_"+dev+"_"+str(n))
+                x[dev,n] = model.addVar(vtype="B", name=f"x_{dev}_{n}")
 
         # All tariff gradations
         for tar in gas_tariffs:
@@ -246,27 +281,27 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
 
         for d in days:
             for t in time_steps:
-                timetag = "_"+str(d)+"_"+str(t)
+                timetag = f"_{d}_{t}"
                 for dev in heater_ehdhw: # All heating devices
                     for n in devs[dev].keys(): # All listed types of each device
                         y[dev,n,d,t] = model.addVar(vtype="B",
-                                       name="y_"+dev+"_"+str(n)+timetag)
+                                       name=f"y_{dev}_{n}_{timetag}")
         for dev in solar: # All solar devices
             for n in devs[dev].keys():
                 max_modules = params["A_max"] / devs[dev][n]["area"]
-                z[dev,n] = model.addVar(vtype="I", name="z_"+dev+"_"+str(n),
+                z[dev,n] = model.addVar(vtype="I", name=f"z_{dev}_{n}",
                                         lb=0, ub=math.floor(max_modules))
 
         y_stc = {}
         for d in days:
             for t in time_steps:
-                timetag = "_"+str(d)+"_"+str(t)
+                timetag = f"_{d}_{t}"
                 y_stc[d,t] = model.addVar(vtype="B", name="y_stc"+timetag)
 
         # Variables for linearization
         lin_pv_bat = {}
         for n in devs["pv"].keys():
-            lin_pv_bat[n] = model.addVar(vtype="I", name="lin_pv_bat_"+str(n))
+            lin_pv_bat[n] = model.addVar(vtype="I", name=f"lin_pv_bat_{n}"))
         lin_bat_sub = model.addVar(vtype="C", name="lin_bat_sub")
 
         # Definition of emissions over all devices that are used
@@ -346,15 +381,15 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
         for tar in gas_tariffs:
             # Choose one tariff level for the dertermined gas tariff
             model.addConstr(sum(x_tariff["gas"][tar][n] for n in x_tariff["gas"][tar].keys()) == x_gas[tar],
-                            name="gas_levels_"+tar+"_"+str(n))
+                            name=f"gas_levels_{tar}_{n}")
             # The tariff level is restricted by the consumed gas amount
             for n in x_tariff["gas"][tar].keys():
                 model.addConstr(x_tariff["gas"][tar][n] * eco["gas"][tar]["lb"][n] <=
                                 (G[tar]["boiler",n] + G[tar]["chp",n]) * 0.001,
-                                name="gas_level_lb"+tar+"_"+str(n))
+                                name=f"gas_level_lb_{tar}_{n}")
                 model.addConstr(x_tariff["gas"][tar][n] * eco["gas"][tar]["ub"][n] >=
                                 (G[tar]["boiler",n] + G[tar]["chp",n]) * 0.001,
-                                name="gas_level_ub"+tar+"_"+str(n))
+                                name=f"gas_level_ub_{tar}_{n}")
 
         # Divide because of energy tax
         for dev in ("boiler","chp"):
@@ -417,10 +452,10 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
             for n in x_tariff["el"][tar].keys():
                 model.addConstr(x_tariff["el"][tar][n] * eco["el"][tar]["lb"][n] <=
                 (El[tar]["grid_hou",n] + El[tar]["grid_hp",n]) * 0.001,
-                name="el_level_lb_"+tar+"_"+str(n))
+                name=f"el_level_lb_{tar}_{n}")
                 model.addConstr(x_tariff["el"][tar][n] * eco["el"][tar]["ub"][n] >=
                 (El[tar]["grid_hou",n] + El[tar]["grid_hp",n]) * 0.001,
-                name="el_level_ub_"+tar+"_"+str(n))
+                name=f"el_level_ub_{tar}_{n}")
 
         # Devide because of optional HP tariff
         for dev in ("grid_hou", "grid_hp"):
@@ -610,10 +645,10 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
                 for d in days:
                     for t in time_steps:
                         # Abbreviations
-                        timetag = "_"+str(d)+"_"+str(t)
+                        timetag = f"_{d}_{t}"
 
                         if dev == "hp":
-                            tag = str(dev) + "_" + str(n) + timetag
+                            tag = f"{dev}_{n}_{d}_{t}"
                             model.addConstr(heat[dev,n,d,t] == sum(lin[dev,n,d,t,i] * devs[dev][n]["Q_heat"][d,t][i]
                                                                for i in range(number_nodes_hp[dev,n,d,t])),
                                                                 "Q_th interpolation "+tag)
@@ -633,7 +668,7 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
                             # generation and gas consumption for a given heat output
                             # for key in values
 
-                            tag = str(dev) + "_" + str(n) + timetag
+                            tag = f"{dev}_{n}_{d}_{t}"
                             model.addConstr(heat[dev,n,d,t] == sum(lin[dev,n,d,t,i] * devs[dev][n]["Q_heat"][i]
                                                                for i in range(number_nodes[dev,n])),
                                                                 "Q_th interpolation "+tag)
@@ -648,6 +683,8 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
                             model.addSOS(gp.GRB.SOS_TYPE2, [lin[dev,n,d,t,i] for i in range(number_nodes[dev,n])])
 
                         elif dev in ("eh", "eh_dhw"):
+                            tag = f"{dev}_{n}_{d}_{t}"
+
                             mod_lvl = devs[dev][n]["mod_lvl"]
                             eta = devs[dev][n]["eta"][d,t]
                             omega = devs[dev][n]["omega"][d,t]
@@ -655,17 +692,17 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
                             q_nom = devs[dev][n]["Q_nom"]
                             model.addConstr(heat[dev,n,d,t]
                                 <= q_nom * y[dev,n,d,t],
-                                name="Max_heat_output_"+dev+"_"+str(n)+timetag)
+                                name="Max_heat_output_"+tag)
                             model.addConstr(heat[dev,n,d,t]
                                 >= q_nom * mod_lvl * y[dev,n,d,t],
-                                name="Min_heat_output_"+dev+"_"+str(n)+timetag)
+                                name="Min_heat_output_"+tag)
                             #interpolate the power with the heat
                             model.addConstr(power[dev,n,d,t]
                                 == 1/eta * heat[dev,n,d,t],
-                                name="Power_equation_"+dev+"_"+str(n)+timetag)
+                                name="Power_equation_"+tag)
                             #interpolate the gas energy with the heat (or the power)
                             model.addConstr(energy[dev,n,d,t] == 0,
-                                name="Energy_equation_"+dev+"_"+str(n)+timetag)
+                                name="Energy_equation_"+tag)
 
 
         # Solar components
@@ -675,17 +712,17 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
                 a = devs[dev][n]["area"]
                 for d in days:
                     for t in time_steps:
-                        timetag = "_"+str(d)+"_"+str(t)
+                        timetag = f"{d}_{t}"
                         eta_th = devs[dev][n]["eta_th"][d][t]
                         eta_el = devs[dev][n]["eta_el"][d][t]
                         solar_irrad = demands["solar_irrad"][d][t]
 
                         model.addConstr(heat[dev,n,d,t] <=
                               eta_th * a * z[dev,n] * solar_irrad,
-                              name="Solar_thermal_"+dev+"_"+str(n)+timetag)
+                              name=f"Solar_thermal_{dev}_{n}_{timetag}")
                         model.addConstr(power[dev,n,d,t] <=
                               eta_el * a * z[dev,n] * solar_irrad * eta_inv,
-                              name="Solar_electrical_"+dev+"_"+str(n)+timetag)
+                              name=f"Solar_electrical_{dev}_{n}_{timetag}")
 
                         # Bestrict sold electricity from PV to 70% of the rated power without
                         # battery storage and 50% with storage system
@@ -695,6 +732,8 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
                             model.addConstr(lin_pv_bat[n] <= M * sum(x["bat",m] for m in devs["bat"].keys()))
                             model.addConstr(z[dev,n] - lin_pv_bat[n] >= 0)
                             model.addConstr(z[dev,n] - lin_pv_bat[n] <= (1-sum(x["bat",m] for m in devs["bat"].keys()))*M)
+
+        # Subsidies Constraints
 
         dev = "pv"
         if options["EEG"] and options["KfW"]:
@@ -756,18 +795,18 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
                     charge = eta_ch / max_cap * ch[dev,n,d,t]
                     discharge = 1 / eta_dch / max_cap * dch[dev,n,d,t]
 
-                    timetag = "_" + str(d) + "_" + str(t)
+                    timetag = f"_{d}_{t}"
                     model.addConstr(soc[dev,n,d,t] == (1-k_loss) * soc_prev +
                                     dt * (charge - discharge),
-                                    name="Storage_bal_"+dev+"_"+str(n)+timetag)
+                                    name=f"Storage_bal_{dev}_{n}_{timetag}")
 
                     model.addConstr(ch[dev,n,d,t] <=
                                     x[dev,n] * 5 * demands["design_heat_load"],
-                                    name="Q_ch_"+str(n)+timetag)
+                                    name=f"Q_ch_{n}_{timetag}")
 
                     model.addConstr(dch[dev,n,d,t] <=
                                     x[dev,n] * 5 * demands["design_heat_load"],
-                                    name="Q_dch_"+str(n)+timetag)
+                                    name=f"Q_dch_{n}_{timetag}")
 
         dev = "bat"
         for n in devs[dev].keys():
@@ -786,20 +825,20 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
                     else:
                         soc_prev = soc[dev,n,d,t-1]
 
-                    timetag = "_" + str(d) + "_" + str(t)
+                    timetag = f"{d}_{t}"
 
                     model.addConstr(soc[dev,n,d,t] == (1-k_loss) * soc_prev +
                         dt / max_cap *
                         (devs[dev][n]["eta"] * ch[dev,n,d,t] - dch[dev,n,d,t]),
-                        name="Storage_balance_"+dev+"_"+str(n)+timetag)
+                        name=f"Storage_balance_{dev}_{n}_{timetag}")
 
                     model.addConstr(ch[dev,n,d,t] <=
                                     x[dev,n] * devs[dev][n]["P_ch_max"],
-                                    name="P_ch_max_"+str(n)+timetag)
+                                    name=f"P_ch_max_{n}_{timetag}")
 
                     model.addConstr(dch[dev,n,d,t] <=
                                     x[dev,n] * devs[dev][n]["P_dch_max"],
-                                    name="P_dch_max_"+str(n)+timetag)
+                                    name=f"P_dch_max_{n}_{timetag}")
 
         # SOC limits and repetitions
         for dev in storage:
@@ -809,15 +848,15 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
                     if np.max(demands["weights"]) > 1:
                         model.addConstr(soc[dev,n,d,params["time_steps"]-1] ==
                                         soc_init[dev,n,d],
-                                        name="repetitions_"+dev+"_"+str(n))
+                                        name=f"repetitions_{dev}_{n}"})
 
                     # SOC limits
                     model.addConstr(soc_init[dev,n,d] <= x[dev,n],
-                          name="soc_init_lim_"+dev+"_"+str(n)+"_"+str(d))
+                          name=f"soc_init_lim_{dev}_{n}_{d}")
                     for t in range(params["time_steps"]):
-                        timetag = "_" + str(d) + "_" + str(t)
+                        timetag = f"{d}_{t}"
                         model.addConstr(soc[dev,n,d,t] <= x[dev,n],
-                                 name="soc_limit_"+dev+"_"+str(n)+timetag)
+                                 name=f"soc_limit_{dev}_{n}_{timetag}")
 
         # Electricity balance
         for d in days:
@@ -830,7 +869,7 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
                         == p_grid["grid_hou",d,t]
                         + sum(p_use[dev,d,t] for dev in ("pv","bat"))
                         + sum(p_use["chp",n,d,t] for n in devs["chp"].keys()),
-                        name="Electricity_balance_w/o_HPtariff"+str(d)+"_"+str(t))
+                        name=f"Electricity_balance_w/o_HPtariff_{d}_{t}")
                 # elec balance for components with hp-tariff (p_hp["bat"] referring to discharge)
                 model.addConstr(
                         sum(power["hp",n,d,t] for n in devs["hp"].keys())
@@ -838,7 +877,7 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
                         == p_grid["grid_hp",d,t]
                         + sum(p_hp[dev,d,t] for dev in ("pv","bat"))
                         + sum(p_hp["chp",n,d,t] for n in devs["chp"].keys()),
-                        name="Electricity_balance_w/_HPtariff"+str(d)+"_"+str(t))
+                        name=f"Electricity_balance_w/_HPtariff_{d}_{t}")
 
         # Thermal balance
         dev = "tes"
@@ -848,10 +887,10 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
                     == sum(sum(heat[dv,nb,d,t]
                        for nb in devs[dv])
                        for dv in (heater_ehdhw+solar)),
-                       name="Thermal_max_charge_"+str(d)+"_"+str(t))
+                       name=f"Thermal_max_charge_{d}_{t}")
                 model.addConstr(sum(dch[dev,n,d,t] for n in devs[dev].keys())
                     == demands["dhw"][d,t] + demands["sh"][d,t],
-                       name="Thermal_max_discharge_"+str(d)+"_"+str(t))
+                       name=f"Thermal_max_discharge_{d}_{t}")
 
         # High temperature heat generators have to cover at least X% of DHW demand
         dem_dhw = np.sum(demands["dhw"], axis=1)
@@ -876,16 +915,16 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
                 dev = "bat"
                 model.addConstr(p_sell[dev,d,t] + p_use[dev,d,t] + p_hp[dev,d,t] ==
                         sum(dch[dev,n,d,t] for n in devs[dev].keys()),
-                        name="power=sell+use+hp_"+dev+"_"+str(d)+"_"+str(t))
+                        name=f"power=sell+use+hp_{dev}_{d}_{t}")
                 dev = "pv"
                 model.addConstr(p_sell[dev,d,t] + p_use[dev,d,t] + p_hp[dev,d,t] ==
                         sum(power[dev,n,d,t] for n in devs[dev].keys()),
-                        name="power=sell+use+hp_"+dev+"_"+str(d)+"_"+str(t))
+                        name=f"power=sell+use+hp_{dev}_{d}_{t}")
                 dev = "chp"
                 for n in devs[dev].keys():
                     model.addConstr(p_sell[dev,n,d,t] + p_use[dev,n,d,t] + p_hp[dev,n,d,t] ==
                             power[dev,n,d,t],
-                            name="power=sell+use+hp_"+dev+"_"+str(d)+"_"+str(t))
+                            name=f"power=sell+use+hp_{dev}_{d}_{t}")
 
         # Split EH power consumption into cases with and without heat pump installed
         dev = "eh"
@@ -911,19 +950,19 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
         for n in devs[dev].keys():
             for d in days:
                 for t in time_steps:
-                    timetag = "_"+str(d)+"_"+str(t)
+                    timetag = f"{d}_{t}"
                     sum_soc = sum(soc["tes",n_tes,d,t]
                                   for n_tes in devs["tes"].keys())
                     model.addConstr(sum_soc <= 1 - y[dev,n,d,t] *
                                     (1 - devs[dev][n]["dt_max"] / dt_max_sto),
-                                    name="Heat_pump_act_"+str(n)+timetag)
+                                    name=f"Heat_pump_act_{n}_{timetag}")
 
         # STC operation is also coupled with storage temperature
         dev = "stc"
 #        y_stc[d,t]
         for d in days:
             for t in time_steps:
-                timetag = "_"+str(d)+"_"+str(t)
+                timetag = f"_{d}_{t}"
                 sum_soc = sum(soc["tes",n_tes,d,t] for n_tes in devs["tes"].keys())
                 sum_heat = sum(heat[dev,n,d,t] for n in devs[dev].keys())
                 model.addConstr(sum_heat <= y_stc[d,t] * 1000)
@@ -1165,42 +1204,54 @@ def compute(eco, devs, demands, params, max_emi, options, max_costs, forced_devs
                         if var.VType == "B":
                             fout.write(var.VarName + "\t" + str(int(var.X)) + "\n")
 
-            # Save results
-            with open(options["filename_results"], "wb") as fout:
-                pickle.dump(res_x, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_y, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_z, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_x_tariff, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_x_gas, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_x_el, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_power, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_heat, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_energy, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_p_grid, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_G, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_G_total, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_El, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_El_total, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_soc, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_soc_init, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_ch, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_dch, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_p_use, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_p_sell, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_p_hp, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_c_inv, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_c_om, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_c_dem, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_c_fix, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_c_eeg, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_c_total, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_rev, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_sub, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_emission, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(res_emission_max, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(model.ObjVal, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(model.Runtime, fout, pickle.HIGHEST_PROTOCOL)
-                pickle.dump(model.MIPGap, fout, pickle.HIGHEST_PROTOCOL)
+            # # Save results
+            # with open(options["filename_results"], "wb") as fout:
+            #     pickle.dump(res_x, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_y, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_z, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_x_tariff, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_x_gas, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_x_el, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_power, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_heat, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_energy, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_p_grid, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_G, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_G_total, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_El, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_El_total, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_soc, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_soc_init, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_ch, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_dch, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_p_use, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_p_sell, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_p_hp, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_c_inv, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_c_om, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_c_dem, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_c_fix, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_c_eeg, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_c_total, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_rev, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_sub, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_emission, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(res_emission_max, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(model.ObjVal, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(model.Runtime, fout, pickle.HIGHEST_PROTOCOL)
+            #     pickle.dump(model.MIPGap, fout, pickle.HIGHEST_PROTOCOL)
+
+            results_p = OptimizationResults(
+                res_x, res_y, res_z, res_x_tariff, res_x_gas, res_x_el,
+                res_power, res_heat, res_energy, res_p_grid, res_G,
+                res_G_total, res_El, res_El_total, res_soc, res_soc_init,
+                res_ch, res_dch, res_p_use, res_p_sell, res_p_hp, res_c_inv,
+                res_c_om, res_c_dem, res_c_fix, res_c_eeg, res_c_total,
+                res_rev, res_sub, res_emission, res_emission_max,
+                model.ObjVal, model.Runtime, model.MIPGap,
+                name=options["filename_results"])
+
+            results_p.save()
 
             # Return results
             return(res_c_total, res_emission)
